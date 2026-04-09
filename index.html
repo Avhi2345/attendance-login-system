@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Live Attendance System</title>
+  <style>
+    * { margin:0; padding:0; box-sizing:border-box; }
+    body {
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      background: #0f172a; color: #e2e8f0;
+      display: flex; flex-direction: column; align-items: center;
+      min-height: 100vh; padding: 20px;
+    }
+    h1 { font-size: 1.8rem; margin-bottom: 6px; color: #38bdf8; }
+    .subtitle { font-size: 0.85rem; color: #64748b; margin-bottom: 20px; }
+    video {
+      width: 480px; max-width: 90vw; border-radius: 12px;
+      border: 2px solid #1e293b; background: #000;
+    }
+    .controls { display: flex; gap: 12px; margin: 16px 0; }
+    button {
+      padding: 10px 28px; border: none; border-radius: 8px;
+      font-size: 1rem; font-weight: 600; cursor: pointer;
+      transition: transform 0.1s, opacity 0.2s;
+    }
+    button:active { transform: scale(0.96); }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+    .btn-register { background: #6366f1; color: #fff; }
+    .btn-login { background: #22c55e; color: #fff; }
+    #challenge-box {
+      background: #1e293b; border: 2px solid #f59e0b; border-radius: 10px;
+      padding: 14px 28px; margin: 12px 0; display: none;
+      text-align: center; font-size: 1.2rem; font-weight: 700; color: #fbbf24;
+    }
+    #status {
+      background: #1e293b; border-radius: 10px; padding: 16px 24px;
+      margin-top: 14px; width: 480px; max-width: 90vw;
+      font-size: 0.85rem; white-space: pre-wrap; line-height: 1.6;
+      min-height: 60px; display: none;
+    }
+    .success { border-left: 4px solid #22c55e; }
+    .fail { border-left: 4px solid #ef4444; }
+    .info { border-left: 4px solid #3b82f6; }
+  </style>
+</head>
+<body>
+  <h1>🔐 Live Attendance System</h1>
+  <p class="subtitle">FaceNet512 · RetinaFace · FAISS · Anti-Spoof · Liveness</p>
+
+  <video id="v" autoplay playsinline></video>
+
+  <div class="controls">
+    <button class="btn-register" id="regBtn" onclick="doRegister()">📷 Register</button>
+    <button class="btn-login" id="logBtn" onclick="doLogin()">✅ Login</button>
+  </div>
+
+  <div id="challenge-box"></div>
+  <div id="status"></div>
+
+  <script>
+    const API = "http://127.0.0.1:8000";
+    const video = document.getElementById("v");
+    const chalBox = document.getElementById("challenge-box");
+    const statusBox = document.getElementById("status");
+
+    // ── HMAC-SHA256 Payload Signer (Native WebCrypto API) ──
+    async function generateHMAC(secret, message) {
+      const enc = new TextEncoder();
+      const key = await crypto.subtle.importKey(
+        "raw", enc.encode(secret),
+        { name: "HMAC", hash: "SHA-256" },
+        false, ["sign"]
+      );
+      const signature = await crypto.subtle.sign("HMAC", key, enc.encode(message));
+      return Array.from(new Uint8Array(signature)).map(b => b.toString(16).padStart(2, '0')).join('');
+    }
+
+    // Start webcam
+    navigator.mediaDevices.getUserMedia({ video: true })
+      .then(s => video.srcObject = s)
+      .catch(() => showStatus("Camera access denied.", "fail"));
+
+    // ── Capture N frames instantly ──
+    function captureFrames(n = 6) {
+      const arr = [];
+      for (let i = 0; i < n; i++) {
+        const c = document.createElement("canvas");
+        c.width = video.videoWidth; c.height = video.videoHeight;
+        c.getContext("2d").drawImage(video, 0, 0);
+        arr.push(c.toDataURL("image/jpeg"));
+      }
+      return arr;
+    }
+
+    // ── Capture frames over time (for challenge) ──
+    function captureOverTime(count, durationMs) {
+      return new Promise(resolve => {
+        const frames = [];
+        const interval = durationMs / count;
+        let i = 0;
+        const timer = setInterval(() => {
+          const c = document.createElement("canvas");
+          c.width = video.videoWidth; c.height = video.videoHeight;
+          c.getContext("2d").drawImage(video, 0, 0);
+          frames.push(c.toDataURL("image/jpeg"));
+          i++;
+          if (i >= count) { clearInterval(timer); resolve(frames); }
+        }, interval);
+      });
+    }
+
+    function showStatus(msg, type = "info") {
+      statusBox.style.display = "block";
+      statusBox.className = type;
+      statusBox.textContent = msg;
+    }
+
+    function setButtons(disabled) {
+      document.getElementById("regBtn").disabled = disabled;
+      document.getElementById("logBtn").disabled = disabled;
+    }
+
+    // ── Register ──
+    async function doRegister() {
+      const name = prompt("Enter your name:");
+      if (!name) return;
+
+      setButtons(true);
+      showStatus("📸 Capturing 6 registration images...", "info");
+
+      const images = captureFrames(6);
+      showStatus("⏳ Registering face...", "info");
+
+      try {
+        const res = await fetch(`${API}/register`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name, images }),
+        });
+        const data = await res.json();
+        if (data.status === "registered") {
+          showStatus(`✅ Registered "${data.name}"!\n   Faces saved: ${data.faces_registered}/${data.total_submitted}`, "success");
+        } else {
+          showStatus(`❌ Registration failed:\n   ${data.detail || JSON.stringify(data)}`, "fail");
+        }
+      } catch (e) {
+        showStatus(`❌ Error: ${e.message}`, "fail");
+      }
+      setButtons(false);
+    }
+
+    // ── Login (two-step: challenge → verify) ──
+    async function doLogin() {
+      setButtons(true);
+
+      // Step 1: Get challenge from server
+      showStatus("🔄 Requesting challenge...", "info");
+      let challenge;
+      try {
+        const res = await fetch(`${API}/challenge`);
+        challenge = await res.json();
+      } catch (e) {
+        showStatus(`❌ Error: ${e.message}`, "fail");
+        setButtons(false);
+        return;
+      }
+
+      // Step 2: Active Flash Liveness & Cryptographic Capture
+      let frames = [];
+      let signature = "";
+      
+      if (challenge.action === "flash") {
+        chalBox.textContent = "💡 Please look directly at the screen (Turn up brightness)";
+        chalBox.style.display = "block";
+        document.body.style.transition = "background-color 0.15s";
+        
+        await new Promise(r => setTimeout(r, 1500)); // let user read
+        showStatus("📹 Analyzing 3D surface light reflection...", "info");
+        
+        const originalBg = document.body.style.backgroundColor;
+        
+        // Sequence flash and capture
+        for (let color of challenge.sequence) {
+          document.body.style.backgroundColor = color === "red" ? "#ef4444" : 
+                                                color === "green" ? "#22c55e" : 
+                                                color === "blue" ? "#3b82f6" : color;
+          
+          // Wait for light to hit face and camera to adjust
+          await new Promise(r => setTimeout(r, 500)); 
+          
+          const c = document.createElement("canvas");
+          c.width = video.videoWidth; c.height = video.videoHeight;
+          c.getContext("2d").drawImage(video, 0, 0);
+          frames.push(c.toDataURL("image/jpeg"));
+        }
+        
+        // Restore screen
+        document.body.style.backgroundColor = originalBg;
+        chalBox.style.display = "none";
+        
+        // ── Security: HMAC Payload Signing ──
+        // Python expected: session_id + "".join(img[-20:] for img in images_b64)
+        let payloadString = challenge.session_id;
+        for (let f of frames) {
+          payloadString += f.slice(-20);
+        }
+        signature = await generateHMAC(challenge.hmac_secret, payloadString);
+        
+      } else {
+         showStatus("❌ Unknown challenge type from server.", "fail");
+         setButtons(false);
+         return;
+      }
+
+      // Step 3: Send verified, signed payload to login endpoint
+      showStatus("🔍 Validating HMAC signature and identity...", "info");
+      try {
+        const res = await fetch(`${API}/login`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            images: frames,
+            session_id: challenge.session_id,
+            signature: signature
+          }),
+        });
+        const data = await res.json();
+
+        if (data.status === "success") {
+          const s = data.scores;
+          showStatus(
+            `✅ Welcome, ${data.name}!\n` +
+            `   Attendance recorded.\n\n` +
+            `   Face Score:      ${s.face_score}\n` +
+            `   Antispoof Score: ${s.antispoof_score}\n` +
+            `   Liveness Score:  ${s.liveness_score}\n` +
+            `   Challenge Conf:  ${s.challenge_confidence}`,
+            "success"
+          );
+        } else {
+          let msg = `❌ ${data.message || data.reason}`;
+          if (data.scores) {
+            const s = data.scores;
+            msg += `\n\n   Face: ${s.face_score}  Anti: ${s.antispoof_score}  Live: ${s.liveness_score}`;
+          }
+          if (data.breakdown) {
+            msg += `\n   Spoof detail: ${JSON.stringify(data.breakdown)}`;
+          }
+          showStatus(msg, "fail");
+        }
+      } catch (e) {
+        showStatus(`❌ Error: ${e.message}`, "fail");
+      }
+      setButtons(false);
+    }
+  </script>
+</body>
+</html>

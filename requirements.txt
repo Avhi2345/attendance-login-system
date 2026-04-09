@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+deepface
+opencv-python
+numpy
+gspread
+google-auth
+python-multipart
+faiss-cpu
+mediapipe
